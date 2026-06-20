@@ -8,6 +8,8 @@ import logging
 import os
 import sys
 import uuid
+from datetime import datetime, timezone
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, AsyncGenerator, Coroutine
 
@@ -40,6 +42,7 @@ from ...agents.utils.file_handling import (
     read_text_file_with_encoding_fallback,
 )
 from ...config.config import load_agent_config
+from ...config import load_config
 from ...constant import WORKING_DIR
 
 if TYPE_CHECKING:
@@ -47,6 +50,19 @@ if TYPE_CHECKING:
     from ...agents.context import BaseContextManager
 
 logger = logging.getLogger(__name__)
+
+# Freeze the date in env_context per active session so that the system
+# prompt stays stable across turns within a session, preserving KV
+# cache prefix. The frozen datetime is refreshed only when the session
+# changes (i.e., the runner receives a request for a different session).
+#
+# These are module-level globals because the check-and-set below runs
+# without any await point between the comparison and the assignment,
+# making it atomic under Python's single-threaded asyncio event loop.
+# Safe as long as there's one worker process. Multi-worker deployment
+# would require per-instance or thread-local state instead.
+_env_context_session_id: str | None = None
+_env_context_frozen_now: datetime | None = None
 
 
 _PRINT_END_SIGNAL = "[END]"
@@ -378,8 +394,6 @@ class AgentRunner(Runner):
 
     async def stream_query(self, request, **kwargs):
         """Override to set created_at to current time on response events."""
-        from datetime import datetime, timezone
-
         created_at = int(
             datetime.now(timezone.utc).timestamp(),
         )
@@ -522,6 +536,16 @@ class AgentRunner(Runner):
                         _fork_project,
                     )
 
+            # Freeze the date per session to keep the system prompt stable
+            # across turns, preserving KV cache prefix.
+            if session_id != _env_context_session_id:
+                _env_context_session_id = session_id
+                _user_tz = load_config().user_timezone or "UTC"
+                try:
+                    _env_context_frozen_now = datetime.now(ZoneInfo(_user_tz))
+                except (ZoneInfoNotFoundError, KeyError):
+                    _env_context_frozen_now = datetime.now(ZoneInfo("UTC"))
+
             env_context = build_env_context(
                 session_id=session_id,
                 user_id=user_id,
@@ -534,6 +558,7 @@ class AgentRunner(Runner):
                 ),
                 default_shell=_default_shell,
                 project_dir=_coding_project_dir,
+                frozen_now=_env_context_frozen_now,
             )
 
             # Get MCP clients from manager (hot-reloadable)
