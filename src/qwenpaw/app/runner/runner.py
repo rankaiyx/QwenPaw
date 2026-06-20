@@ -538,6 +538,7 @@ class AgentRunner(Runner):
 
             # Freeze the date per session to keep the system prompt stable
             # across turns, preserving KV cache prefix.
+            global _env_context_session_id, _env_context_frozen_now
             if session_id != _env_context_session_id:
                 _env_context_session_id = session_id
                 _user_tz = load_config().user_timezone or "UTC"
