@@ -51,16 +51,9 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-# Freeze the date in env_context per active session so that the system
-# prompt stays stable across turns within a session, preserving KV
-# cache prefix. The frozen datetime is refreshed only when the session
-# changes (i.e., the runner receives a request for a different session).
-#
-# These are module-level globals because the check-and-set below runs
-# without any await point between the comparison and the assignment,
-# making it atomic under Python's single-threaded asyncio event loop.
-# Safe as long as there's one worker process. Multi-worker deployment
-# would require per-instance or thread-local state instead.
+# Per-session date freezing: keep system prompt stable across turns
+# to preserve KV cache prefix. Refreshed on session switch.
+# Module-level globals are safe for single-worker deployment.
 _env_context_session_id: str | None = None
 _env_context_frozen_now: datetime | None = None
 
@@ -536,8 +529,7 @@ class AgentRunner(Runner):
                         _fork_project,
                     )
 
-            # Freeze the date per session to keep the system prompt stable
-            # across turns, preserving KV cache prefix.
+            # Freeze date per session to preserve KV cache prefix
             global _env_context_session_id, _env_context_frozen_now
             if session_id != _env_context_session_id:
                 _env_context_session_id = session_id
