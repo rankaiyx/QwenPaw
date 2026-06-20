@@ -8,8 +8,10 @@ import logging
 import os
 import sys
 import uuid
+from datetime import datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, AsyncGenerator, Coroutine
+from zoneinfo import ZoneInfo
 
 import frontmatter as fm
 from agentscope.message import Msg, TextBlock
@@ -39,7 +41,7 @@ from ...exceptions import convert_model_exception
 from ...agents.utils.file_handling import (
     read_text_file_with_encoding_fallback,
 )
-from ...config.config import load_agent_config
+from ...config.config import load_agent_config, load_config
 from ...constant import WORKING_DIR
 
 if TYPE_CHECKING:
@@ -522,6 +524,50 @@ class AgentRunner(Runner):
                         _fork_project,
                     )
 
+            # --- Freeze System Prompt date for KV Cache stability ---
+            # Read or initialize init_date and last_injected_date.
+            # The actual correction suffix is appended later (after all
+            # _rewrite_last_message_text calls) to avoid being overwritten.
+            _date_states = await self.session.get_session_state_dict(
+                session_id=session_id,
+                user_id=user_id,
+                channel=channel,
+                allow_not_exist=True,
+            )
+            _init_date = _date_states.get("agent", {}).get("init_date")
+            _last_injected_date = _date_states.get("agent", {}).get(
+                "last_injected_date",
+            )
+
+            _user_tz = load_config().user_timezone or "UTC"
+            _now = datetime.now(ZoneInfo(_user_tz))
+            _today_str = _now.strftime("%Y-%m-%d")
+            _needs_date_correction = False
+
+            if _init_date is None:
+                # New session or old session migration: initialize with today
+                _init_date = _today_str
+                _last_injected_date = _today_str
+                await self.session.update_session_state(
+                    session_id=session_id,
+                    key="agent.init_date",
+                    value=_init_date,
+                    user_id=user_id,
+                    channel=channel,
+                )
+                await self.session.update_session_state(
+                    session_id=session_id,
+                    key="agent.last_injected_date",
+                    value=_last_injected_date,
+                    user_id=user_id,
+                    channel=channel,
+                )
+            elif _last_injected_date != _today_str:
+                # Cross-day: flag for correction (appended later, after
+                # all _rewrite_last_message_text calls to avoid overwrite)
+                _needs_date_correction = True
+            # else: same day, no operation
+
             env_context = build_env_context(
                 session_id=session_id,
                 user_id=user_id,
@@ -534,6 +580,7 @@ class AgentRunner(Runner):
                 ),
                 default_shell=_default_shell,
                 project_dir=_coding_project_dir,
+                override_date=_init_date,
             )
 
             # Get MCP clients from manager (hot-reloadable)
@@ -892,6 +939,39 @@ class AgentRunner(Runner):
                     len(_cron_memory_snapshot.get("memory", [])),
                     session_id,
                 )
+
+            # If cross-day correction is needed, append the date update suffix
+            # now — after all _rewrite_last_message_text calls have finished,
+            # so the suffix won't be overwritten.
+            if _needs_date_correction:
+                # Reuse _now from above (defined near init_date logic).
+                # Guaranteed reachable: no control path skips that definition
+                # without exiting the function. Reusing keeps _today_str and
+                # the weekday consistent, avoiding midnight-crossing mismatch.
+                _today_full = (
+                    f"{_today_str} {_user_tz} "
+                    f"({_now.strftime('%A')})"
+                )
+                _correction_suffix = (
+                    f"\n\n<<<DATE_UPDATE>>> {_today_full}"
+                )
+                _correction_applied = False
+                for _msg in msgs:
+                    if _msg.role == "user":
+                        _msg.content = (_msg.content or "") + _correction_suffix
+                        _correction_applied = True
+                        break
+                # Only update last_injected_date if the suffix was actually
+                # attached; otherwise the next request would skip correction
+                # and the model would remain unaware of the date change.
+                if _correction_applied:
+                    await self.session.update_session_state(
+                        session_id=session_id,
+                        key="agent.last_injected_date",
+                        value=_today_str,
+                        user_id=user_id,
+                        channel=channel,
+                    )
 
             # Rebuild system prompt so it always reflects the latest
             # AGENTS.md / SOUL.md / PROFILE.md, not the stale one saved

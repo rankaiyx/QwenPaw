@@ -39,6 +39,7 @@ def build_env_context(
     add_hint: bool = True,
     default_shell: Optional[str] = None,
     project_dir: Optional[str] = None,
+    override_date: Optional[str] = None,
 ) -> str:
     """
     Build environment context with current request context prepended.
@@ -58,6 +59,10 @@ def build_env_context(
             directory" line is replaced with an explicit
             "Project directory" + "Agent workspace (internal)" pair
             so the LLM stops treating the workspace as home.
+        override_date: Optional date string (YYYY-MM-DD) to use instead
+            of the current date. When provided, the weekday is computed
+            from this date. Used to freeze the System Prompt date for
+            KV Cache prefix stability.
 
     Returns:
         Formatted environment context string
@@ -65,6 +70,16 @@ def build_env_context(
     parts = []
     user_tz = load_config().user_timezone or "UTC"
     try:
+        if override_date:
+            now = datetime.strptime(override_date, "%Y-%m-%d").replace(
+                tzinfo=ZoneInfo(user_tz),
+            )
+        else:
+            now = datetime.now(ZoneInfo(user_tz))
+    except ValueError:
+        logger.warning(
+            "Invalid override_date %r, using current date", override_date
+        )
         now = datetime.now(ZoneInfo(user_tz))
     except (ZoneInfoNotFoundError, KeyError):
         logger.warning("Invalid timezone %r, falling back to UTC", user_tz)
@@ -380,7 +395,7 @@ def agentscope_msg_to_message(
     user_tz_name = load_config().user_timezone or "UTC"
     try:
         user_tz = ZoneInfo(user_tz_name)
-    except (ZoneInfoNotFoundError, KeyError):
+    except (ZoneInfoNotFoundError, KeyError, ValueError):
         user_tz = timezone.utc
 
     for msg in msgs:
