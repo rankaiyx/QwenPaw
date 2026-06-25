@@ -530,14 +530,21 @@ class AgentRunner(Runner):
                     )
 
             # Freeze date per session to preserve KV cache prefix
-            global _env_context_session_id, _env_context_frozen_now
-            if session_id != _env_context_session_id:
-                _env_context_session_id = session_id
-                _user_tz = load_config().user_timezone or "UTC"
-                try:
-                    _env_context_frozen_now = datetime.now(ZoneInfo(_user_tz))
-                except (ZoneInfoNotFoundError, KeyError):
-                    _env_context_frozen_now = datetime.now(ZoneInfo("UTC"))
+            frozen_now = None
+            if self.agent_config.freeze_env_context_date:
+                global _env_context_session_id, _env_context_frozen_now
+                if session_id != _env_context_session_id:
+                    _env_context_session_id = session_id
+                    _user_tz = load_config().user_timezone or "UTC"
+                    try:
+                        _env_context_frozen_now = datetime.now(
+                            ZoneInfo(_user_tz),
+                        )
+                    except (ZoneInfoNotFoundError, KeyError):
+                        _env_context_frozen_now = datetime.now(
+                            ZoneInfo("UTC"),
+                        )
+                frozen_now = _env_context_frozen_now
 
             env_context = build_env_context(
                 session_id=session_id,
@@ -551,7 +558,7 @@ class AgentRunner(Runner):
                 ),
                 default_shell=_default_shell,
                 project_dir=_coding_project_dir,
-                frozen_now=_env_context_frozen_now,
+                frozen_now=frozen_now,
             )
 
             # Get MCP clients from manager (hot-reloadable)
